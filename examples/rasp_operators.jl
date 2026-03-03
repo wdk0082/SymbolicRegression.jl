@@ -262,6 +262,54 @@ function make_minimum_dataset(; n_samples=128, seq_lens=3:6, rng=Random.Mersenne
     return X, y
 end
 
+function make_maximum_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
+    X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
+    y = Vector{RaspValue}(undef, n_samples)
+    for i in 1:n_samples
+        n = rand(rng, seq_lens)
+        toks = Float64.(randperm(rng, 20)[1:n])
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
+        y[i] = RaspValue(fill(maximum(toks), n))
+    end
+    return X, y
+end
+
+function make_sort_descending_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
+    X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
+    y = Vector{RaspValue}(undef, n_samples)
+    for i in 1:n_samples
+        n = rand(rng, seq_lens)
+        toks = Float64.(randperm(rng, 20)[1:n])
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
+        y[i] = RaspValue(sort(toks; rev=true))
+    end
+    return X, y
+end
+
+function make_shift_right_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
+    X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
+    y = Vector{RaspValue}(undef, n_samples)
+    for i in 1:n_samples
+        n = rand(rng, seq_lens)
+        toks = Float64.(rand(rng, 1:10, n))
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
+        y[i] = RaspValue([0.0; toks[1:end-1]])  # shift right, 0 fills position 0
+    end
+    return X, y
+end
+
+function make_mean_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
+    X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
+    y = Vector{RaspValue}(undef, n_samples)
+    for i in 1:n_samples
+        n = rand(rng, seq_lens)
+        toks = Float64.(rand(rng, 1:10, n))
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
+        y[i] = RaspValue(fill(sum(toks) / n, n))
+    end
+    return X, y
+end
+
 function make_cumulative_mean_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
     X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
     y = Vector{RaspValue}(undef, n_samples)
@@ -361,10 +409,28 @@ end
     sorted = aggregate(select_eq(rank, unique_indices), unique_tokens)
     @test sorted.seq == [1.0, 2.0, 5.0, 8.0]
 
-    # minimum: aggregate(select_eq(rank, [0.0]), tokens)
-    #   = pick the element whose rank is 0 (nothing smaller than it)
+    # minimum: aggregate(select_eq(rank, [0.0]), tokens)  -- rank 0 = nothing smaller
     min_val = aggregate(select_eq(rank, RaspValue([0.0])), unique_tokens)
     @test min_val.seq == [1.0, 1.0, 1.0, 1.0]
+
+    # maximum: aggregate(select_eq(rank, len-1), tokens)  -- rank n-1 = nothing larger
+    len_u = selector_width(select_true(unique_tokens, unique_tokens))
+    max_val = aggregate(select_eq(rank, seq_sub(len_u, RaspValue([1.0]))), unique_tokens)
+    @test max_val.seq == [8.0, 8.0, 8.0, 8.0]
+
+    # sort descending: aggregate(select_eq(len-1-rank, indices), tokens)
+    desc_rank = seq_sub(seq_sub(len_u, rank), RaspValue([1.0]))
+    @test desc_rank.seq == [1.0, 2.0, 0.0, 3.0]  # 5→1, 2→2, 8→0, 1→3
+    sorted_desc = aggregate(select_eq(desc_rank, unique_indices), unique_tokens)
+    @test sorted_desc.seq == [8.0, 5.0, 2.0, 1.0]
+
+    # shift right: aggregate(select_eq(indices, indices - 1), tokens)  -- default 0
+    shifted = aggregate(select_eq(indices, seq_sub(indices, RaspValue([1.0]))), tokens)
+    @test shifted.seq == [0.0, 3.0, 1.0, 3.0, 2.0]
+
+    # mean: aggregate(select_true(tokens, tokens), tokens)
+    mean_val = aggregate(select_true(tokens, tokens), tokens)
+    @test mean_val.seq ≈ fill(2.4, 5)  # (3+1+3+2+3)/5
 
     # cumulative mean: aggregate(select_leq(indices, indices), tokens)
     cm_tokens = RaspValue([4.0, 2.0, 6.0])
@@ -382,17 +448,23 @@ end
 end
 
 # ── 7. SR integration ──────────────────────────────────────────────────────────
-# Choose a task:  :hist  :reverse  :sort  :minimum  :cumulative_mean
-TASK = :sort
+# Choose a task:
+#   :hist :reverse :sort :sort_descending :minimum :maximum
+#   :shift_right :mean :cumulative_mean
+TASK = :reverse
 
 datasets = Dict(
-    :hist            => () -> make_hist_dataset(; n_samples=128, seq_lens=3:6),
-    :reverse         => () -> make_reverse_dataset(; n_samples=128, seq_lens=3:6),
-    :sort            => () -> make_sort_dataset(; n_samples=128, seq_lens=3:6),
-    :minimum         => () -> make_minimum_dataset(; n_samples=128, seq_lens=3:6),
-    :cumulative_mean => () -> make_cumulative_mean_dataset(; n_samples=128, seq_lens=3:6),
+    :hist            => make_hist_dataset,
+    :reverse         => make_reverse_dataset,
+    :sort            => make_sort_dataset,
+    :sort_descending => make_sort_descending_dataset,
+    :minimum         => make_minimum_dataset,
+    :maximum         => make_maximum_dataset,
+    :shift_right     => make_shift_right_dataset,
+    :mean            => make_mean_dataset,
+    :cumulative_mean => make_cumulative_mean_dataset,
 )
-X, y = datasets[TASK]()
+X, y = datasets[TASK](; n_samples=128, seq_lens=3:6)
 
 model = SRRegressor(;
     binary_operators=(select_eq, select_lt, select_leq, select_true, aggregate, seq_add, seq_sub),
@@ -400,13 +472,14 @@ model = SRRegressor(;
     operator_enum_constructor=GenericOperatorEnum,
     elementwise_loss=rasp_loss,
     loss_type=Float64,
-    maxsize=15,
-    niterations=300,
+    maxsize=20,
+    niterations=2000,
     batching=true,
     batch_size=32,
-    parsimony=0.05,
+    parsimony=0.01,
     adaptive_parsimony_scaling=20.0,
     early_stop_condition=(l, c) -> l < 1e-6,
+    population_size=100,
 )
 
 mach = machine(model, X, y; scitype_check_level=0)
