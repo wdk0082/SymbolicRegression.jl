@@ -92,6 +92,17 @@ function select_lt(keys::RaspValue, queries::RaspValue)::RaspValue
     RaspValue(sel)
 end
 
+function select_gt(keys::RaspValue, queries::RaspValue)::RaspValue
+    (keys.tag != :seq || queries.tag != :seq) && return sentinel_sel(_infer_n(keys, queries))
+    ks, qs = _broadcast_seqs(keys.seq, queries.seq)
+    n = length(ks)
+    sel = Matrix{Bool}(undef, n, n)
+    @inbounds for i in 1:n, j in 1:n
+        sel[i, j] = ks[j] > qs[i]
+    end
+    RaspValue(sel)
+end
+
 function select_leq(keys::RaspValue, queries::RaspValue)::RaspValue
     (keys.tag != :seq || queries.tag != :seq) && return sentinel_sel(_infer_n(keys, queries))
     ks, qs = _broadcast_seqs(keys.seq, queries.seq)
@@ -418,10 +429,11 @@ end
     max_val = aggregate(select_eq(rank, seq_sub(len_u, RaspValue([1.0]))), unique_tokens)
     @test max_val.seq == [8.0, 8.0, 8.0, 8.0]
 
-    # sort descending: aggregate(select_eq(len-1-rank, indices), tokens)
-    desc_rank = seq_sub(seq_sub(len_u, rank), RaspValue([1.0]))
-    @test desc_rank.seq == [1.0, 2.0, 0.0, 3.0]  # 5→1, 2→2, 8→0, 1→3
-    sorted_desc = aggregate(select_eq(desc_rank, unique_indices), unique_tokens)
+    # sort descending via select_gt: aggregate(select_eq(rank_desc, indices), tokens)
+    #   where rank_desc = selector_width(select_gt(tokens, tokens))
+    rank_desc = selector_width(select_gt(unique_tokens, unique_tokens))
+    @test rank_desc.seq == [1.0, 2.0, 0.0, 3.0]  # 5 has 1 larger, 2 has 2, 8 has 0, 1 has 3
+    sorted_desc = aggregate(select_eq(rank_desc, unique_indices), unique_tokens)
     @test sorted_desc.seq == [8.0, 5.0, 2.0, 1.0]
 
     # shift right: aggregate(select_eq(indices, indices - 1), tokens)  -- default 0
@@ -451,7 +463,7 @@ end
 # Choose a task:
 #   :hist :reverse :sort :sort_descending :minimum :maximum
 #   :shift_right :mean :cumulative_mean
-TASK = :reverse
+TASK = :sort_descending
 
 datasets = Dict(
     :hist            => make_hist_dataset,
@@ -464,22 +476,22 @@ datasets = Dict(
     :mean            => make_mean_dataset,
     :cumulative_mean => make_cumulative_mean_dataset,
 )
-X, y = datasets[TASK](; n_samples=128, seq_lens=3:6)
+X, y = datasets[TASK](; n_samples=256, seq_lens=3:20)
 
 model = SRRegressor(;
-    binary_operators=(select_eq, select_lt, select_leq, select_true, aggregate, seq_add, seq_sub),
+    binary_operators=(select_eq, select_lt, select_gt, select_leq, select_true, aggregate, seq_add, seq_sub),
     unary_operators=(selector_width,),
     operator_enum_constructor=GenericOperatorEnum,
     elementwise_loss=rasp_loss,
     loss_type=Float64,
-    maxsize=20,
+    maxsize=17,
     niterations=2000,
     batching=true,
     batch_size=32,
-    parsimony=0.01,
+    parsimony=0.05,
     adaptive_parsimony_scaling=20.0,
     early_stop_condition=(l, c) -> l < 1e-6,
-    population_size=100,
+    population_size=50,
 )
 
 mach = machine(model, X, y; scitype_check_level=0)
