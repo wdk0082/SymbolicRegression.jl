@@ -504,3 +504,23 @@ fit!(mach)
     mean_loss = sum(rasp_loss(ŷ[i], y[i]) for i in eachindex(y)) / length(y)
     @test mean_loss < 10.0
 end
+
+# ── 8. Show best solution on sample inputs ───────────────────────────────────
+
+let r = report(mach)
+    best_eq = r.equations[end]
+    println("\n", "="^70)
+    println("Best equation (complexity $(r.complexities[end])): ", best_eq)
+    println("="^70)
+    n_show = min(5, length(X))
+    Xmat = MLJBase.matrix(X; transpose=true)
+    for i in 1:n_show
+        pred = best_eq(Xmat[:, i:i])[1]
+        println("\nSample $i:")
+        println("  tokens  = ", X[i].tokens.seq)
+        println("  indices = ", X[i].indices.seq)
+        println("  target  = ", y[i].seq)
+        println("  predict = ", pred.tag == :seq ? pred.seq : pred)
+        println("  loss    = ", rasp_loss(pred, y[i]))
+    end
+end
