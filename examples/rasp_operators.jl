@@ -92,6 +92,17 @@ function select_lt(keys::RaspValue, queries::RaspValue)::RaspValue
     RaspValue(sel)
 end
 
+function select_leq(keys::RaspValue, queries::RaspValue)::RaspValue
+    (keys.tag != :seq || queries.tag != :seq) && return sentinel_sel(_infer_n(keys, queries))
+    ks, qs = _broadcast_seqs(keys.seq, queries.seq)
+    n = length(ks)
+    sel = Matrix{Bool}(undef, n, n)
+    @inbounds for i in 1:n, j in 1:n
+        sel[i, j] = ks[j] <= qs[i]
+    end
+    RaspValue(sel)
+end
+
 function select_true(keys::RaspValue, queries::RaspValue)::RaspValue
     (keys.tag != :seq || queries.tag != :seq) && return sentinel_sel(_infer_n(keys, queries))
     ks, qs = _broadcast_seqs(keys.seq, queries.seq)
@@ -203,28 +214,62 @@ end
 
 # ── 5. Data generation ─────────────────────────────────────────────────────────
 
-function make_hist_dataset(; n_samples=128, seq_len=5, rng=Random.MersenneTwister(0))
-    indices_val = RaspValue(Float64.(0:seq_len-1))
+function make_hist_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
     X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
     y = Vector{RaspValue}(undef, n_samples)
     for i in 1:n_samples
-        toks = Float64.(rand(rng, 1:10, seq_len))
-        tokens_val = RaspValue(toks)
-        X[i] = (; tokens=tokens_val, indices=indices_val)
-        y[i] = RaspValue([Float64(count(==(toks[k]), toks)) for k in 1:seq_len])
+        n = rand(rng, seq_lens)
+        toks = Float64.(rand(rng, 1:10, n))
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
+        y[i] = RaspValue([Float64(count(==(toks[k]), toks)) for k in 1:n])
     end
     return X, y
 end
 
-function make_reverse_dataset(; n_samples=128, seq_len=5, rng=Random.MersenneTwister(0))
-    indices_val = RaspValue(Float64.(0:seq_len-1))
+function make_reverse_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
     X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
     y = Vector{RaspValue}(undef, n_samples)
     for i in 1:n_samples
-        toks = Float64.(rand(rng, 1:10, seq_len))
-        tokens_val = RaspValue(toks)
-        X[i] = (; tokens=tokens_val, indices=indices_val)
+        n = rand(rng, seq_lens)
+        toks = Float64.(rand(rng, 1:10, n))
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
         y[i] = RaspValue(reverse(toks))
+    end
+    return X, y
+end
+
+function make_sort_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
+    X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
+    y = Vector{RaspValue}(undef, n_samples)
+    for i in 1:n_samples
+        n = rand(rng, seq_lens)
+        toks = Float64.(randperm(rng, 20)[1:n])
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
+        y[i] = RaspValue(sort(toks))
+    end
+    return X, y
+end
+
+function make_minimum_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
+    X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
+    y = Vector{RaspValue}(undef, n_samples)
+    for i in 1:n_samples
+        n = rand(rng, seq_lens)
+        toks = Float64.(randperm(rng, 20)[1:n])
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
+        y[i] = RaspValue(fill(minimum(toks), n))
+    end
+    return X, y
+end
+
+function make_cumulative_mean_dataset(; n_samples=128, seq_lens=3:6, rng=Random.MersenneTwister(0))
+    X = Vector{@NamedTuple{tokens::RaspValue, indices::RaspValue}}(undef, n_samples)
+    y = Vector{RaspValue}(undef, n_samples)
+    for i in 1:n_samples
+        n = rand(rng, seq_lens)
+        toks = Float64.(rand(rng, 1:10, n))
+        X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
+        y[i] = RaspValue([sum(toks[1:k]) / k for k in 1:n])
     end
     return X, y
 end
@@ -306,6 +351,26 @@ end
     rev_sel = select_eq(indices, rev_idx)
     reversed = aggregate(rev_sel, tokens)
     @test reversed.seq == [3.0, 2.0, 3.0, 1.0, 3.0]
+
+    # sort (unique elements): aggregate(select_eq(rank, indices), tokens)
+    #   where rank = selector_width(select_lt(tokens, tokens))
+    unique_tokens = RaspValue([5.0, 2.0, 8.0, 1.0])
+    unique_indices = RaspValue([0.0, 1.0, 2.0, 3.0])
+    rank = selector_width(select_lt(unique_tokens, unique_tokens))
+    @test rank.seq == [2.0, 1.0, 3.0, 0.0]
+    sorted = aggregate(select_eq(rank, unique_indices), unique_tokens)
+    @test sorted.seq == [1.0, 2.0, 5.0, 8.0]
+
+    # minimum: aggregate(select_eq(rank, [0.0]), tokens)
+    #   = pick the element whose rank is 0 (nothing smaller than it)
+    min_val = aggregate(select_eq(rank, RaspValue([0.0])), unique_tokens)
+    @test min_val.seq == [1.0, 1.0, 1.0, 1.0]
+
+    # cumulative mean: aggregate(select_leq(indices, indices), tokens)
+    cm_tokens = RaspValue([4.0, 2.0, 6.0])
+    cm_indices = RaspValue([0.0, 1.0, 2.0])
+    cm = aggregate(select_leq(cm_indices, cm_indices), cm_tokens)
+    @test cm.seq ≈ [4.0, 3.0, 4.0]  # [4/1, 6/2, 12/3]
 end
 
 @testset "RASP loss function" begin
@@ -316,33 +381,41 @@ end
     @test rasp_loss(RaspValue([1.0]), RaspValue([1.0, 2.0])) == RASP_BAD_LOSS
 end
 
-# ── 7. SR integration (hist task) ──────────────────────────────────────────────
+# ── 7. SR integration ──────────────────────────────────────────────────────────
+# Choose a task:  :hist  :reverse  :sort  :minimum  :cumulative_mean
+TASK = :sort
 
-X, y = make_hist_dataset(; n_samples=128, seq_len=5)
+datasets = Dict(
+    :hist            => () -> make_hist_dataset(; n_samples=128, seq_lens=3:6),
+    :reverse         => () -> make_reverse_dataset(; n_samples=128, seq_lens=3:6),
+    :sort            => () -> make_sort_dataset(; n_samples=128, seq_lens=3:6),
+    :minimum         => () -> make_minimum_dataset(; n_samples=128, seq_lens=3:6),
+    :cumulative_mean => () -> make_cumulative_mean_dataset(; n_samples=128, seq_lens=3:6),
+)
+X, y = datasets[TASK]()
 
 model = SRRegressor(;
-    binary_operators=(select_eq, select_lt, select_true, aggregate, seq_add, seq_sub),
+    binary_operators=(select_eq, select_lt, select_leq, select_true, aggregate, seq_add, seq_sub),
     unary_operators=(selector_width,),
     operator_enum_constructor=GenericOperatorEnum,
     elementwise_loss=rasp_loss,
     loss_type=Float64,
     maxsize=15,
+    niterations=300,
     batching=true,
     batch_size=32,
     parsimony=0.05,
     adaptive_parsimony_scaling=20.0,
-    mutation_weights=MutationWeights(; mutate_constant=0.5),
     early_stop_condition=(l, c) -> l < 1e-6,
 )
 
 mach = machine(model, X, y; scitype_check_level=0)
 fit!(mach)
 
-@testset "SR integration smoke test" begin
+@testset "SR integration smoke test ($TASK)" begin
     r = report(mach)
-    # Evaluate best equation on the dataset to check loss
     best_eq = r.equations[end]
     ŷ = best_eq(MLJBase.matrix(X; transpose=true))
     mean_loss = sum(rasp_loss(ŷ[i], y[i]) for i in eachindex(y)) / length(y)
-    @test mean_loss < 10.0  # At least found something reasonable
+    @test mean_loss < 10.0
 end
