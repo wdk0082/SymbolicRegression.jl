@@ -121,6 +121,13 @@ function select_true(keys::RaspValue, queries::RaspValue)::RaspValue
     RaspValue(fill(true, n, n))
 end
 
+# Unary: seq_not (seq → seq)
+
+function seq_not(a::RaspValue)::RaspValue
+    a.tag != :seq && return sentinel_seq(_infer_n(a))
+    RaspValue(Float64.(a.seq .== 0))
+end
+
 # Unary: SelectorWidth (sel → seq)
 
 function selector_width(x::RaspValue)::RaspValue
@@ -173,6 +180,41 @@ function seq_sub(a::RaspValue, b::RaspValue)::RaspValue
     (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
     sa, sb = _broadcast_seqs(a.seq, b.seq)
     RaspValue(sa .- sb)
+end
+
+function seq_mul(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(sa .* sb)
+end
+
+function seq_eq(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.(sa .== sb))
+end
+
+function seq_neq(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.(sa .!= sb))
+end
+
+function seq_lt(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.(sa .< sb))
+end
+
+function seq_gt(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.(sa .> sb))
+end
+
+function seq_and(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.((sa .!= 0) .& (sb .!= 0)))
+end
+
+function seq_or(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.((sa .!= 0) .| (sb .!= 0)))
 end
 
 # ── 3. SR interface overloads ───────────────────────────────────────────────────
@@ -370,6 +412,25 @@ end
     # scalar broadcast
     @test seq_add(RaspValue([1.0, 2.0]), RaspValue([10.0])).seq == [11.0, 12.0]
     @test seq_sub(RaspValue([10.0]), RaspValue([1.0, 2.0])).seq == [9.0, 8.0]
+
+    # seq_mul
+    @test seq_mul(RaspValue([2.0, 3.0]), RaspValue([4.0, 5.0])).seq == [8.0, 15.0]
+    @test seq_mul(RaspValue([2.0, 3.0]), RaspValue([10.0])).seq == [20.0, 30.0]
+
+    # seq_eq / seq_neq
+    @test seq_eq(RaspValue([1.0, 2.0, 3.0]), RaspValue([1.0, 5.0, 3.0])).seq == [1.0, 0.0, 1.0]
+    @test seq_neq(RaspValue([1.0, 2.0, 3.0]), RaspValue([1.0, 5.0, 3.0])).seq == [0.0, 1.0, 0.0]
+
+    # seq_lt / seq_gt
+    @test seq_lt(RaspValue([1.0, 5.0, 3.0]), RaspValue([2.0, 3.0, 3.0])).seq == [1.0, 0.0, 0.0]
+    @test seq_gt(RaspValue([1.0, 5.0, 3.0]), RaspValue([2.0, 3.0, 3.0])).seq == [0.0, 1.0, 0.0]
+
+    # seq_and / seq_or
+    @test seq_and(RaspValue([1.0, 0.0, 1.0]), RaspValue([1.0, 1.0, 0.0])).seq == [1.0, 0.0, 0.0]
+    @test seq_or(RaspValue([1.0, 0.0, 0.0]), RaspValue([0.0, 0.0, 1.0])).seq == [1.0, 0.0, 1.0]
+
+    # seq_not
+    @test seq_not(RaspValue([1.0, 0.0, 3.0])).seq == [0.0, 1.0, 0.0]
 end
 
 @testset "RASP sentinel / no-throw behavior" begin
@@ -479,8 +540,8 @@ datasets = Dict(
 X, y = datasets[TASK](; n_samples=256, seq_lens=3:20)
 
 model = SRRegressor(;
-    binary_operators=(select_eq, select_lt, select_gt, select_leq, select_true, aggregate, seq_add, seq_sub),
-    unary_operators=(selector_width,),
+    binary_operators=(select_eq, select_lt, select_gt, select_leq, select_true, aggregate, seq_add, seq_sub, seq_mul, seq_eq, seq_neq, seq_lt, seq_gt, seq_and, seq_or),
+    unary_operators=(selector_width, seq_not),
     operator_enum_constructor=GenericOperatorEnum,
     elementwise_loss=rasp_loss,
     loss_type=Float64,

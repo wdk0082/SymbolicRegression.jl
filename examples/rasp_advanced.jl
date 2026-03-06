@@ -96,6 +96,13 @@ function select_true(keys::RaspValue, queries::RaspValue)::RaspValue
     RaspValue(fill(true, length(ks), length(ks)))
 end
 
+# --- Unary: seq_not (seq → seq) ---
+
+function seq_not(a::RaspValue)::RaspValue
+    a.tag != :seq && return sentinel_seq(_infer_n(a))
+    RaspValue(Float64.(a.seq .== 0))
+end
+
 # --- Unary: SelectorWidth (sel → seq) ---
 
 function selector_width(x::RaspValue)::RaspValue
@@ -143,6 +150,31 @@ end
 function seq_eq(a::RaspValue, b::RaspValue)::RaspValue
     (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
     sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.(sa .== sb))
+end
+
+function seq_neq(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.(sa .!= sb))
+end
+
+function seq_lt(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.(sa .< sb))
+end
+
+function seq_gt(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.(sa .> sb))
+end
+
+function seq_and(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.((sa .!= 0) .& (sb .!= 0)))
+end
+
+function seq_or(a::RaspValue, b::RaspValue)::RaspValue
+    (a.tag != :seq || b.tag != :seq) && return sentinel_seq(_infer_n(a, b))
+    sa, sb = _broadcast_seqs(a.seq, b.seq); RaspValue(Float64.((sa .!= 0) .| (sb .!= 0)))
 end
 
 # ── 3. SR interface overloads ──────────────────────────────────────────────────
@@ -255,7 +287,7 @@ function make_positional_arith_dataset(; n_samples=128, seq_lens=4:6, rng=Random
         n = rand(rng, seq_lens)
         toks = Float64.(rand(rng, 1:10, n))
         X[i] = (; tokens=RaspValue(toks), indices=RaspValue(Float64.(0:n-1)))
-        val = toks[1] + toks[2] - toks[3]  # 1-indexed: positions 0,1,2
+        val = toks[1] * toks[2] + toks[3]  # modify here to control the formula to search for
         y[i] = RaspValue(fill(val, n))
     end
     return X, y
@@ -284,15 +316,31 @@ end
 
 # ── 6. Unit tests ──────────────────────────────────────────────────────────────
 
-@testset "New operators: seq_mul and seq_eq" begin
+@testset "Elementwise seq ops" begin
+    # seq_mul
     @test seq_mul(RaspValue([2.0, 3.0]), RaspValue([4.0, 5.0])).seq == [8.0, 15.0]
     @test seq_mul(RaspValue([2.0, 3.0]), RaspValue([10.0])).seq == [20.0, 30.0]
+
+    # seq_eq / seq_neq
     @test seq_eq(RaspValue([1.0, 2.0, 3.0]), RaspValue([1.0, 5.0, 3.0])).seq == [1.0, 0.0, 1.0]
     @test seq_eq(RaspValue([1.0, 2.0]), RaspValue([1.0])).seq == [1.0, 0.0]
+    @test seq_neq(RaspValue([1.0, 2.0, 3.0]), RaspValue([1.0, 5.0, 3.0])).seq == [0.0, 1.0, 0.0]
+
+    # seq_lt / seq_gt
+    @test seq_lt(RaspValue([1.0, 5.0, 3.0]), RaspValue([2.0, 3.0, 3.0])).seq == [1.0, 0.0, 0.0]
+    @test seq_gt(RaspValue([1.0, 5.0, 3.0]), RaspValue([2.0, 3.0, 3.0])).seq == [0.0, 1.0, 0.0]
+
+    # seq_and / seq_or
+    @test seq_and(RaspValue([1.0, 0.0, 1.0]), RaspValue([1.0, 1.0, 0.0])).seq == [1.0, 0.0, 0.0]
+    @test seq_or(RaspValue([1.0, 0.0, 0.0]), RaspValue([0.0, 0.0, 1.0])).seq == [1.0, 0.0, 1.0]
+
+    # seq_not
+    @test seq_not(RaspValue([1.0, 0.0, 3.0])).seq == [0.0, 1.0, 0.0]
 
     # Sentinel on type mismatch
     @test all(isnan, seq_mul(RaspValue(fill(true, 2, 2)), RaspValue([1.0])).seq)
     @test all(isnan, seq_eq(RaspValue(fill(true, 2, 2)), RaspValue([1.0])).seq)
+    @test all(isnan, seq_not(RaspValue(fill(true, 2, 2))).seq)
 end
 
 @testset "Advanced composed programs" begin
@@ -347,17 +395,17 @@ X, y = datasets[TASK](; n_samples=128, seq_lens=3:6)
 model = SRRegressor(;
     binary_operators=(
         select_eq, select_lt, select_gt, select_leq, select_true,
-        aggregate, seq_add, seq_sub, seq_mul, seq_eq,
+        aggregate, seq_add, seq_sub, seq_mul, seq_eq, seq_neq, seq_lt, seq_gt, seq_and, seq_or,
     ),
-    unary_operators=(selector_width,),
+    unary_operators=(selector_width, seq_not),
     operator_enum_constructor=GenericOperatorEnum,
     elementwise_loss=rasp_loss,
     loss_type=Float64,
-    maxsize=18,
-    niterations=500,
+    maxsize=25,
+    niterations=2000,
     batching=true,
     batch_size=32,
-    parsimony=0.01,
+    parsimony=0.02,
     adaptive_parsimony_scaling=40.0,
     warmup_maxsize_by=0.2,
     mutation_weights=MutationWeights(; mutate_constant=1.0, add_node=2.0, insert_node=2.0),
